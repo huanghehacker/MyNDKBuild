@@ -19,10 +19,8 @@ jobs:
     name: Make NDK Bionic for aarch64
     runs-on: ubuntu-24.04
     env:
-      ROOTDIR: ${{ github.workspace }}
       TARGET: aarch64-linux-android
       ANDROID_PLATFORM: 25
-      WORK_DIR: ${{ runner.temp }}/workdir
 
     steps:
       - name: Checkout android-ndk-custom
@@ -34,15 +32,15 @@ jobs:
         id: cache-deps
         uses: actions/cache@v4
         with:
-          # 修正: 将 runner.temp 放入表达式中
-          path: ${{ env.WORK_DIR }}
+          # 在 steps 级别可以使用 runner 上下文
+          path: ${{ runner.temp }}/workdir
           key: ${{ runner.os }}-${{ env.TARGET }}-symbols-${{ hashFiles('**/sources/**', '**/patches/**') }}
 
       - name: Get Official NDK and Clean Up
         run: |
           echo "Downloading NDK r${{inputs.version}}${{inputs.revision}}..."
           curl -sSfL -o android-ndk.zip "https://dl.google.com/android/repository/android-ndk-r${{inputs.version}}${{inputs.revision}}-linux.zip"
-          unzip -qq android-ndk.zip -d ${{ runner.temp }}
+          unzip -qq android-ndk.zip -d $RUNNER_TEMP
           rm -f android-ndk.zip # 优化: 立即删除压缩包以节省空间
 
       - name: Install System Dependencies and Clean Up
@@ -54,18 +52,21 @@ jobs:
 
       - name: Build Extra Dependencies
         run: |
-          mkdir -p ${{ env.WORK_DIR }}
-          cd ${{ env.WORK_DIR }}
+          # 修复: 在脚本内部定义 WORK_DIR 和 ROOTDIR
+          WORK_DIR="$RUNNER_TEMP/workdir"
+          ROOTDIR="$GITHUB_WORKSPACE"
+          
+          mkdir -p "$WORK_DIR"
+          cd "$WORK_DIR"
 
           HAVE_PSELECT=yes
-          NDK_DIR="${{ runner.temp }}/android-ndk-r${{inputs.version}}${{inputs.revision}}"
+          NDK_DIR="$RUNNER_TEMP/android-ndk-r${{inputs.version}}${{inputs.revision}}"
           TOOLCHAIN=$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64
           SHADER_TOOLS_BIN="$NDK_DIR/shader-tools/linux-x86_64"
           PREBUILT_BIN="$NDK_DIR/prebuilt/linux-x86_64/bin"
           MAKE_VERSION=4.4
           YASM_VERSION=$($PREBUILT_BIN/yasm --version | sed -n '1s/.*yasm \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p')
 
-          # ... [获取 SHADERC, SPIRV 等 HASH 的逻辑保持不变] ...
           if [ "${{inputs.version}}" -ge 30 ]; then
             GLSLC_VERSION_OUTPUT="$($SHADER_TOOLS_BIN/glslc --version)"
             SHADERC_HASH=$(echo "$GLSLC_VERSION_OUTPUT" | sed -n 's/^shaderc .* \([a-f0-9]\{40\}\)$/\1/p')
@@ -85,7 +86,7 @@ jobs:
             tar -xzf $ROOTDIR/sources/make-$MAKE_VERSION.tar.gz
             mv make-$MAKE_VERSION make
             cd make
-            cp ${{github.workspace}}/config/config.sub build-aux && cp ${{github.workspace}}/config/config.guess build-aux
+            cp $ROOTDIR/config/config.sub build-aux && cp $ROOTDIR/config/config.guess build-aux
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-posix-spawn \
               CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang CFLAGS="-Wno-error=implicit-function-declaration -static" LDFLAGS="-static" \
               ac_cv_lib_elf_elf_begin=no am_cv_func_iconv=no ac_cv_func_pselect=$HAVE_PSELECT
@@ -151,14 +152,14 @@ jobs:
 
       - name: Make NDK Bionic
         run: |
-          NDK="${{ runner.temp }}/android-ndk-r${{inputs.version}}${{inputs.revision}}"
+          WORK_DIR="$RUNNER_TEMP/workdir"
+          NDK="$RUNNER_TEMP/android-ndk-r${{inputs.version}}${{inputs.revision}}"
           HOST_TOOLCHAIN="${PWD}/bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}"
           NDK_TOOLCHAIN_SYMLINK="${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           CC="${NDK_TOOLCHAIN_SYMLINK}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang"
 
-          # ... [和原来一样的替换、修改脚本、复制二进制文件的逻辑] ...
-          $CC $CFLAGS ${{ github.workspace }}/sources/portable_cmp.c -o ${NDK}/prebuilt/linux-x86_64/bin/cmp
-          $CC $CFLAGS ${{ github.workspace }}/sources/portable_echo.c -o ${NDK}/prebuilt/linux-x86_64/bin/echo
+          $CC $CFLAGS $GITHUB_WORKSPACE/sources/portable_cmp.c -o ${NDK}/prebuilt/linux-x86_64/bin/cmp
+          $CC $CFLAGS $GITHUB_WORKSPACE/sources/portable_echo.c -o ${NDK}/prebuilt/linux-x86_64/bin/echo
           find "${NDK_TOOLCHAIN_SYMLINK}/bin" -type f | while IFS= read -r file; do
               bname="$(basename "${file}")"
               if [ -f "${HOST_TOOLCHAIN}/bin/${bname}" ] && file "${file}" | grep -q 'ELF'; then
@@ -169,11 +170,13 @@ jobs:
                   rm -f "${file}"
               fi
           done
+          
           sed -i 's,#!/usr/bin/env bash,#!/usr/bin/env sh,' "${NDK}/build/tools/ndk_bin_common.sh" "${NDK}/build/tools/make_standalone_toolchain.py" "${NDK}/build/ndk-build"
           sed -i 's,#!/bin/bash,#!/bin/sh,' "${NDK}/prebuilt/linux-x86_64/bin/ndk-gdb" "${NDK}/prebuilt/linux-x86_64/bin/ndk-stack" "${NDK}/prebuilt/linux-x86_64/bin/ndk-which" "${NDK}/simpleperf/inferno.sh" "${NDK_TOOLCHAIN_SYMLINK}/bin/lldb.sh"
-          cp ${{ github.workspace }}/patches/ndk/scripts/clang-tidy.sh ${NDK_TOOLCHAIN_SYMLINK}/bin
-          cp ${{ github.workspace }}/patches/ndk/scripts/ndk-which ${NDK}/prebuilt/linux-x86_64/bin
+          cp $GITHUB_WORKSPACE/patches/ndk/scripts/clang-tidy.sh ${NDK_TOOLCHAIN_SYMLINK}/bin
+          cp $GITHUB_WORKSPACE/patches/ndk/scripts/ndk-which ${NDK}/prebuilt/linux-x86_64/bin
           rm -rf "${NDK_TOOLCHAIN_SYMLINK}/python3" "${NDK}/prebuilt/linux_x86-64/bin/*asm"
+          
           cp -R "${HOST_TOOLCHAIN}/lib/clang" "${NDK_TOOLCHAIN_SYMLINK}/lib"
           cp "${WORK_DIR}/make/build/bin/make" "${NDK}/prebuilt/linux-x86_64/bin"
           cp "${WORK_DIR}/yasm/build/bin/yasm" "${NDK}/prebuilt/linux-x86_64/bin"
@@ -181,8 +184,9 @@ jobs:
           mkdir -p "${NDK_TOOLCHAIN_SYMLINK}/python3/bin" "${NDK_TOOLCHAIN_SYMLINK}/python3/lib"
           cp "${WORK_DIR}/python/python" "${NDK_TOOLCHAIN_SYMLINK}/python3/bin/python3"
           cp -R "${WORK_DIR}/python/build/lib/python3.11" "${NDK_TOOLCHAIN_SYMLINK}/python3/lib"
-          find "${NDK}/shader-tools/linux-x86_64" -type f -exec bash -c 'cp "${WORK_DIR}/shaderc/install/bin/$(basename "{}")" "{}"' \;
+          find "${NDK}/shader-tools/linux-x86_64" -type f -exec bash -c 'cp "'$WORK_DIR'/shaderc/install/bin/$(basename "{}")" "{}"' \;
           rm -f "${NDK}/shader-tools/linux-x86_64/libc++.so"
+          
           ARCH="arm64"
           mv "${NDK}/prebuilt/linux-x86_64" "${NDK}/prebuilt/linux-${ARCH}"
           mv "${NDK}/toolchains/llvm/prebuilt/linux-x86_64" "${NDK}/toolchains/llvm/prebuilt/linux-${ARCH}"
@@ -190,14 +194,16 @@ jobs:
           ln -s "linux-${ARCH}" "${NDK}/prebuilt/linux-x86_64"
           ln -s "linux-${ARCH}" "${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           ln -s "linux-${ARCH}" "${NDK}/shader-tools/linux-x86_64"
+          
           for file in ${NDK}/ndk-gdb ${NDK}/ndk-lldb ${NDK}/ndk-stack ${NDK}/ndk-which; do sed -i "s|linux-x86_64|linux-${ARCH}|g" "$file"; done
           sed -i -E '/^if\(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux\)$/,/^endif\(\)$/c\if(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux OR CMAKE_HOST_SYSTEM_NAME STREQUAL Android)\n    execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)\n    if(HOST_ARCH STREQUAL "aarch64")\n        set(ARCH "arm64")\n    else()\n        set(ARCH "x86_64")\n    endif()\n    set(ANDROID_HOST_TAG "linux-${ARCH}")\nelseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Darwin)\n    set(ANDROID_HOST_TAG "darwin-x86_64")\nelseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)\n    set(ANDROID_HOST_TAG "windows-x86_64")\nendif()' "${NDK}/build/cmake/android.toolchain.cmake"
-          (cd $NDK && /usr/bin/cc ${{ github.workspace }}/sources/package-generator.c -o $HOME/package-generator && $HOME/package-generator package.xml $(grep '^Pkg\.Revision =' source.properties | cut -d'=' -f2 | tr -d ' '))
+          
+          (cd $NDK && /usr/bin/cc $GITHUB_WORKSPACE/sources/package-generator.c -o $HOME/package-generator && $HOME/package-generator package.xml $(grep '^Pkg\.Revision =' source.properties | cut -d'=' -f2 | tr -d ' '))
           
       - name: Create LLVM Version JSON
         id: create_json
         run: |
-          NDK_DIR="${{ runner.temp }}/android-ndk-r${{inputs.version}}${{inputs.revision}}"
+          NDK_DIR="$RUNNER_TEMP/android-ndk-r${{inputs.version}}${{inputs.revision}}"
           NDK_VERSION="r${{inputs.version}}${{inputs.revision}}"
           LLVM_VERSION_STRING=$($NDK_DIR/toolchains/llvm/prebuilt/linux-arm64/bin/clang --version | head -n 1)
           jq -n --arg ndk_version "$NDK_VERSION" --arg llvm_version "$LLVM_VERSION_STRING" \
@@ -208,25 +214,26 @@ jobs:
       - name: Free Up Disk Space Before Archiving
         run: |
           # 优化: 删除所有不再需要的中间构建目录
-          rm -rf ${{ env.WORK_DIR }}
+          WORK_DIR="$RUNNER_TEMP/workdir"
+          rm -rf "$WORK_DIR"
           rm -rf "${PWD}/bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}"
 
       - name: Archive NDK into Split Files
         run: |
           ARCHIVE_PREFIX="android-ndk-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz"
-          cd ${{ runner.temp }}
+          cd $RUNNER_TEMP
           echo "Archiving and splitting into 200MB chunks..."
-          # 优化: 流式处理并分割，避免生成单个大文件
+          # 优化: 流式处理并分割，避免生成单个大文件撑爆磁盘和内存
           tar -cf - "android-ndk-r${{inputs.version}}${{inputs.revision}}" | \
           xz -T0 -9e --lzma2=dict=256MiB | \
-          split -b 200M -d -a 3 - "${GITHUB_WORKSPACE}/${ARCHIVE_PREFIX}."
+          split -b 200M -d -a 3 - "$GITHUB_WORKSPACE/${ARCHIVE_PREFIX}."
 
       - name: Release
         uses: ncipollo/release-action@v1
         with:
           name: "r${{inputs.version}}${{inputs.revision}}"
           tag: "r${{inputs.version}}"
-          # 优化: 使用通配符上传所有分卷
+          # 匹配所有分割后的文件 (例如 .000, .001 等)
           artifacts: "android-ndk-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz.*"
           allowUpdates: true
           replacesArtifacts: true
