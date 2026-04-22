@@ -1,5 +1,5 @@
 name: Make NDK (Bionic libc) for aarch64
-run-name: Make NDK-r${{inputs.version}}${{inputs.revision}} bionic for aarch64
+run-name: Make NDK-r${{inputs.version}}${{inputs.revision}} bionic for aarch64 (with symbols, split archive)
 on:
   workflow_dispatch:
     inputs:
@@ -19,39 +19,38 @@ jobs:
     name: Make NDK Bionic for aarch64
     runs-on: ubuntu-24.04
     env:
-      ROOTDIR: ${{github.workspace}}
-      # 目标架构固定为 aarch64-linux-android
+      ROOTDIR: ${{ github.workspace }}
       TARGET: aarch64-linux-android
-      # aarch64 对应的 Android 平台级别
       ANDROID_PLATFORM: 25
-      # 为缓存创建一个专门的工作目录
       WORK_DIR: ${{ runner.temp }}/workdir
 
     steps:
       - name: Checkout android-ndk-custom
         uses: actions/checkout@v5
         with:
-          path: ${{github.workspace}}
+          path: ${{ github.workspace }}
 
-      # 步骤 1: 缓存依赖项以加速后续运行
       - name: Cache Dependencies
         id: cache-deps
         uses: actions/cache@v4
         with:
+          # 修正: 将 runner.temp 放入表达式中
           path: ${{ env.WORK_DIR }}
-          key: ${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('**/sources/**', '**/patches/**') }}
+          key: ${{ runner.os }}-${{ env.TARGET }}-symbols-${{ hashFiles('**/sources/**', '**/patches/**') }}
 
-      - name: Get Official NDK
+      - name: Get Official NDK and Clean Up
         run: |
           echo "Downloading NDK r${{inputs.version}}${{inputs.revision}}..."
           curl -sSfL -o android-ndk.zip "https://dl.google.com/android/repository/android-ndk-r${{inputs.version}}${{inputs.revision}}-linux.zip"
           unzip -qq android-ndk.zip -d ${{ runner.temp }}
+          rm -f android-ndk.zip # 优化: 立即删除压缩包以节省空间
 
-      - name: Install Dependencies
+      - name: Install System Dependencies and Clean Up
         run: |
           sudo add-apt-repository ppa:deadsnakes/ppa -y
           sudo apt update
           sudo apt install -y ninja-build python3.11
+          sudo apt-get clean # 优化: 清理 apt 缓存
 
       - name: Build Extra Dependencies
         run: |
@@ -59,14 +58,14 @@ jobs:
           cd ${{ env.WORK_DIR }}
 
           HAVE_PSELECT=yes
-
           NDK_DIR="${{ runner.temp }}/android-ndk-r${{inputs.version}}${{inputs.revision}}"
           TOOLCHAIN=$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64
           SHADER_TOOLS_BIN="$NDK_DIR/shader-tools/linux-x86_64"
           PREBUILT_BIN="$NDK_DIR/prebuilt/linux-x86_64/bin"
           MAKE_VERSION=4.4
           YASM_VERSION=$($PREBUILT_BIN/yasm --version | sed -n '1s/.*yasm \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p')
-          
+
+          # ... [获取 SHADERC, SPIRV 等 HASH 的逻辑保持不变] ...
           if [ "${{inputs.version}}" -ge 30 ]; then
             GLSLC_VERSION_OUTPUT="$($SHADER_TOOLS_BIN/glslc --version)"
             SHADERC_HASH=$(echo "$GLSLC_VERSION_OUTPUT" | sed -n 's/^shaderc .* \([a-f0-9]\{40\}\)$/\1/p')
@@ -83,59 +82,152 @@ jobs:
 
           # GNU Make
           if [ ! -d "make" ]; then
-            cat $ROOTDIR/sources/make-$MAKE_VERSION.tar.gz | gzip -d | tar -x
+            tar -xzf $ROOTDIR/sources/make-$MAKE_VERSION.tar.gz
             mv make-$MAKE_VERSION make
             cd make
-            cp ${{github.workspace}}/config/config.sub build-aux
-            cp ${{github.workspace}}/config/config.guess build-aux
-            ./configure \
-            --prefix="${PWD}/build" \
-            --build=x86_64-linux-gnu \
-            --host=${{ env.TARGET }} \
-            --disable-posix-spawn \
-            CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang \
-            CXX=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang++ \
-            CFLAGS="-Wno-error=implicit-function-declaration -static" \
-            LDFLAGS="-static" \
-            ac_cv_lib_elf_elf_begin=no \
-            am_cv_func_iconv=no \
-            ac_cv_func_pselect=$HAVE_PSELECT
+            cp ${{github.workspace}}/config/config.sub build-aux && cp ${{github.workspace}}/config/config.guess build-aux
+            ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-posix-spawn \
+              CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang CFLAGS="-Wno-error=implicit-function-declaration -static" LDFLAGS="-static" \
+              ac_cv_lib_elf_elf_begin=no am_cv_func_iconv=no ac_cv_func_pselect=$HAVE_PSELECT
             make -j"$(nproc --all)" install
             cd ..
           fi
           
           # YASM
           if [ ! -d "yasm" ]; then
-            cat $ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz | gzip -d | tar -x
+            tar -xzf $ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz
             mv yasm-$YASM_VERSION yasm
             cd yasm
-            cp $ROOTDIR/config/config.sub config
-            cp $ROOTDIR/config/config.guess config
-            ./configure \
-            --prefix="${PWD}/build" \
-            --build=x86_64-linux-gnu \
-            --host=${{ env.TARGET }} \
-            --disable-nls \
-            CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang \
-            CFLAGS="-static"
+            cp $ROOTDIR/config/config.sub config && cp $ROOTDIR/config/config.guess config
+            ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-nls \
+              CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang CFLAGS="-static"
             make -j"$(nproc --all)" install
             cd ..
           fi
 
           # SPIRV-Tools and shaderc
           if [ ! -d "shaderc" ]; then
-            mkdir -p shaderc
-            cd shaderc
+            mkdir -p shaderc && cd shaderc
             curl -LkSs "https://android.googlesource.com/platform/external/shaderc/shaderc/+archive/$SHADERC_HASH.tar.gz" | tar -xz
-            mkdir -p third_party/spirv-tools/external/spirv-headers
-            curl -LkSs "https://android.googlesource.com/platform/external/shaderc/spirv-tools/+archive/$SPIRV_TOOLS_HASH.tar.gz" | tar -xz -C third_party/spirv-tools
+            mkdir -p third_party/spirv-tools/external/spirv-headers && curl -LkSs "https://android.googlesource.com/platform/external/shaderc/spirv-tools/+archive/$SPIRV_TOOLS_HASH.tar.gz" | tar -xz -C third_party/spirv-tools
             curl -LkSs "https://android.googlesource.com/platform/external/shaderc/spirv-headers/+archive/$SPIRV_HEADERS_HASH.tar.gz" | tar -xz -C third_party/spirv-tools/external/spirv-headers
-            mkdir -p third_party/glslang
-            curl -LkSs "https://android.googlesource.com/platform/external/shaderc/glslang/+archive/$GLSLANG_HASH.tar.gz" | tar -xz -C third_party/glslang
-            
-            cd third_party/glslang
-            sed -i '/^elseif(UNIX)$/,/^[[:space:]]*endif()$/d' StandAlone/CMakeLists.txt
-            cd ../spirv-tools
-            git init --quiet && git apply $ROOTDIR/patches/ndk/spirv/full_static.patch && rm -rf .git
-            cd ../..
-            git init --quiet && git apply $ROOTDIR/patch
+            mkdir -p third_party/glslang && curl -LkSs "https://android.googlesource.com/platform/external/shaderc/glslang/+archive/$GLSLANG_HASH.tar.gz" | tar -xz -C third_party/glslang
+            sed -i '/^elseif(UNIX)$/,/^[[:space:]]*endif()$/d' third_party/glslang/StandAlone/CMakeLists.txt
+            (cd third_party/spirv-tools && git init --quiet && git apply $ROOTDIR/patches/ndk/spirv/full_static.patch && rm -rf .git)
+            git init --quiet && git apply $ROOTDIR/patches/ndk/shaderc/full_static.patch && rm -rf .git
+            cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+              -DCMAKE_BUILD_TYPE=RelWithDebInfo `# 保留符号` \
+              -DCMAKE_C_FLAGS="-static" -DCMAKE_CXX_FLAGS="-static" -DCMAKE_EXE_LINKER_FLAGS="-static" \
+              -DCMAKE_CROSSCOMPILING=True -DCMAKE_SYSTEM_NAME=Linux \
+              -DCMAKE_C_COMPILER="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" \
+              -DCMAKE_CXX_COMPILER="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang++" \
+              -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON
+            cmake --build build --target install
+            cd ..
+          fi
+
+          # Python
+          if [ ! -d "python" ]; then
+            curl -LkSs https://www.python.org/ftp/python/3.11.4/Python-3.11.4.tar.xz | xz -d | tar -x
+            mv Python-3.11.4 python && cd python
+            cp $ROOTDIR/config/config.sub . && cp $ROOTDIR/config/config.guess .
+            echo -e "ac_cv_file__dev_ptmx=no\nac_cv_file__dev_ptc=no" > config.site
+            sed -i '/^case \$host_cpu in #(/,/^esac$/c\MODULE_BUILDTYPE=static' configure
+            ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-shared --disable-ipv6 \
+              --with-build-python --without-ensurepip CONFIG_SITE=config.site \
+              CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang \
+              LDSHARED="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang -shared -fPIC" _PYTHON_HOST_PLATFORM="${{ env.TARGET }}"
+            make -j"$(nproc --all)" build_all || echo "WARNING: issue in building python for ${{ env.TARGET }}"
+            make install
+            cd ..
+          fi
+
+      - name: Get LLVM and Clean Up
+        run: |
+          LLVM_ARCHIVE="bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz"
+          curl -LkSs "https://github.com/${{ github.repository_owner }}/llvm-custom/releases/download/llvm-r${{inputs.version}}/${LLVM_ARCHIVE}" -o "${LLVM_ARCHIVE}"
+          tar -xJf "${LLVM_ARCHIVE}"
+          rm -f "${LLVM_ARCHIVE}" # 优化: 立即删除压缩包
+
+      - name: Make NDK Bionic
+        run: |
+          NDK="${{ runner.temp }}/android-ndk-r${{inputs.version}}${{inputs.revision}}"
+          HOST_TOOLCHAIN="${PWD}/bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}"
+          NDK_TOOLCHAIN_SYMLINK="${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
+          CC="${NDK_TOOLCHAIN_SYMLINK}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang"
+
+          # ... [和原来一样的替换、修改脚本、复制二进制文件的逻辑] ...
+          $CC $CFLAGS ${{ github.workspace }}/sources/portable_cmp.c -o ${NDK}/prebuilt/linux-x86_64/bin/cmp
+          $CC $CFLAGS ${{ github.workspace }}/sources/portable_echo.c -o ${NDK}/prebuilt/linux-x86_64/bin/echo
+          find "${NDK_TOOLCHAIN_SYMLINK}/bin" -type f | while IFS= read -r file; do
+              bname="$(basename "${file}")"
+              if [ -f "${HOST_TOOLCHAIN}/bin/${bname}" ] && file "${file}" | grep -q 'ELF'; then
+                  cp "${HOST_TOOLCHAIN}/bin/${bname}" "${file}"
+              elif file "${file}" | grep -q 'Bourne-Again shell script'; then
+                  sed -i 's,#!/usr/bin/env bash,#!/usr/bin/env sh,' "${file}"
+              elif ! file "${file}" | grep -Eq 'Python script|Perl script|ASCII text'; then
+                  rm -f "${file}"
+              fi
+          done
+          sed -i 's,#!/usr/bin/env bash,#!/usr/bin/env sh,' "${NDK}/build/tools/ndk_bin_common.sh" "${NDK}/build/tools/make_standalone_toolchain.py" "${NDK}/build/ndk-build"
+          sed -i 's,#!/bin/bash,#!/bin/sh,' "${NDK}/prebuilt/linux-x86_64/bin/ndk-gdb" "${NDK}/prebuilt/linux-x86_64/bin/ndk-stack" "${NDK}/prebuilt/linux-x86_64/bin/ndk-which" "${NDK}/simpleperf/inferno.sh" "${NDK_TOOLCHAIN_SYMLINK}/bin/lldb.sh"
+          cp ${{ github.workspace }}/patches/ndk/scripts/clang-tidy.sh ${NDK_TOOLCHAIN_SYMLINK}/bin
+          cp ${{ github.workspace }}/patches/ndk/scripts/ndk-which ${NDK}/prebuilt/linux-x86_64/bin
+          rm -rf "${NDK_TOOLCHAIN_SYMLINK}/python3" "${NDK}/prebuilt/linux_x86-64/bin/*asm"
+          cp -R "${HOST_TOOLCHAIN}/lib/clang" "${NDK_TOOLCHAIN_SYMLINK}/lib"
+          cp "${WORK_DIR}/make/build/bin/make" "${NDK}/prebuilt/linux-x86_64/bin"
+          cp "${WORK_DIR}/yasm/build/bin/yasm" "${NDK}/prebuilt/linux-x86_64/bin"
+          cp "${WORK_DIR}/yasm/build/bin/yasm" "${NDK_TOOLCHAIN_SYMLINK}/bin"
+          mkdir -p "${NDK_TOOLCHAIN_SYMLINK}/python3/bin" "${NDK_TOOLCHAIN_SYMLINK}/python3/lib"
+          cp "${WORK_DIR}/python/python" "${NDK_TOOLCHAIN_SYMLINK}/python3/bin/python3"
+          cp -R "${WORK_DIR}/python/build/lib/python3.11" "${NDK_TOOLCHAIN_SYMLINK}/python3/lib"
+          find "${NDK}/shader-tools/linux-x86_64" -type f -exec bash -c 'cp "${WORK_DIR}/shaderc/install/bin/$(basename "{}")" "{}"' \;
+          rm -f "${NDK}/shader-tools/linux-x86_64/libc++.so"
+          ARCH="arm64"
+          mv "${NDK}/prebuilt/linux-x86_64" "${NDK}/prebuilt/linux-${ARCH}"
+          mv "${NDK}/toolchains/llvm/prebuilt/linux-x86_64" "${NDK}/toolchains/llvm/prebuilt/linux-${ARCH}"
+          mv "${NDK}/shader-tools/linux-x86_64" "${NDK}/shader-tools/linux-${ARCH}"
+          ln -s "linux-${ARCH}" "${NDK}/prebuilt/linux-x86_64"
+          ln -s "linux-${ARCH}" "${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
+          ln -s "linux-${ARCH}" "${NDK}/shader-tools/linux-x86_64"
+          for file in ${NDK}/ndk-gdb ${NDK}/ndk-lldb ${NDK}/ndk-stack ${NDK}/ndk-which; do sed -i "s|linux-x86_64|linux-${ARCH}|g" "$file"; done
+          sed -i -E '/^if\(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux\)$/,/^endif\(\)$/c\if(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux OR CMAKE_HOST_SYSTEM_NAME STREQUAL Android)\n    execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)\n    if(HOST_ARCH STREQUAL "aarch64")\n        set(ARCH "arm64")\n    else()\n        set(ARCH "x86_64")\n    endif()\n    set(ANDROID_HOST_TAG "linux-${ARCH}")\nelseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Darwin)\n    set(ANDROID_HOST_TAG "darwin-x86_64")\nelseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)\n    set(ANDROID_HOST_TAG "windows-x86_64")\nendif()' "${NDK}/build/cmake/android.toolchain.cmake"
+          (cd $NDK && /usr/bin/cc ${{ github.workspace }}/sources/package-generator.c -o $HOME/package-generator && $HOME/package-generator package.xml $(grep '^Pkg\.Revision =' source.properties | cut -d'=' -f2 | tr -d ' '))
+          
+      - name: Create LLVM Version JSON
+        id: create_json
+        run: |
+          NDK_DIR="${{ runner.temp }}/android-ndk-r${{inputs.version}}${{inputs.revision}}"
+          NDK_VERSION="r${{inputs.version}}${{inputs.revision}}"
+          LLVM_VERSION_STRING=$($NDK_DIR/toolchains/llvm/prebuilt/linux-arm64/bin/clang --version | head -n 1)
+          jq -n --arg ndk_version "$NDK_VERSION" --arg llvm_version "$LLVM_VERSION_STRING" \
+            '{ndk_version: $ndk_version, llvm_version: $llvm_version}' > "$NDK_DIR/llvm_version.json"
+          echo "Generated llvm_version.json:"
+          cat "$NDK_DIR/llvm_version.json"
+
+      - name: Free Up Disk Space Before Archiving
+        run: |
+          # 优化: 删除所有不再需要的中间构建目录
+          rm -rf ${{ env.WORK_DIR }}
+          rm -rf "${PWD}/bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}"
+
+      - name: Archive NDK into Split Files
+        run: |
+          ARCHIVE_PREFIX="android-ndk-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz"
+          cd ${{ runner.temp }}
+          echo "Archiving and splitting into 200MB chunks..."
+          # 优化: 流式处理并分割，避免生成单个大文件
+          tar -cf - "android-ndk-r${{inputs.version}}${{inputs.revision}}" | \
+          xz -T0 -9e --lzma2=dict=256MiB | \
+          split -b 200M -d -a 3 - "${GITHUB_WORKSPACE}/${ARCHIVE_PREFIX}."
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          name: "r${{inputs.version}}${{inputs.revision}}"
+          tag: "r${{inputs.version}}"
+          # 优化: 使用通配符上传所有分卷
+          artifacts: "android-ndk-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz.*"
+          allowUpdates: true
+          replacesArtifacts: true
+          token: ${{ secrets.GITHUB_TOKEN }}
