@@ -64,6 +64,16 @@ jobs:
           PREBUILT_BIN="$NDK_DIR/prebuilt/linux-x86_64/bin"
           MAKE_VERSION=4.4
           YASM_VERSION=$("$PREBUILT_BIN/yasm" --version | sed -n '1s/.*yasm \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p')
+          
+          # 定义全局交叉编译工具链
+          export CC="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang"
+          export CXX="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang++"
+          export AR="${TOOLCHAIN}/bin/llvm-ar"
+          export RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+          export READELF="${TOOLCHAIN}/bin/llvm-readelf"
+          export STRIP="${TOOLCHAIN}/bin/llvm-strip"
+          export LD="${TOOLCHAIN}/bin/ld"
+          export OBJCOPY="${TOOLCHAIN}/bin/llvm-objcopy"
 
           if [ "${{inputs.version}}" -ge 30 ]; then
             GLSLC_VERSION_OUTPUT="$($SHADER_TOOLS_BIN/glslc --version)"
@@ -84,7 +94,6 @@ jobs:
             if [ -f "$ROOTDIR/sources/make-$MAKE_VERSION.tar.gz" ]; then
               tar -xzf "$ROOTDIR/sources/make-$MAKE_VERSION.tar.gz"
             else
-              echo "Local make-$MAKE_VERSION.tar.gz not found, downloading from GNU..."
               curl -LkSs "https://ftp.gnu.org/gnu/make/make-$MAKE_VERSION.tar.gz" | tar -xz
             fi
             mv make-$MAKE_VERSION make
@@ -101,7 +110,8 @@ jobs:
             fi
 
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-posix-spawn \
-              CC="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" CFLAGS="-Wno-error=implicit-function-declaration -static" LDFLAGS="-static" \
+              CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" LD="$LD" OBJCOPY="$OBJCOPY" \
+              CFLAGS="-Wno-error=implicit-function-declaration -static" LDFLAGS="-static" \
               ac_cv_lib_elf_elf_begin=no am_cv_func_iconv=no ac_cv_func_pselect=$HAVE_PSELECT
             make -j"$(nproc --all)" install
             cd ..
@@ -112,7 +122,6 @@ jobs:
             if [ -f "$ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz" ]; then
               tar -xzf "$ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz"
             else
-              echo "Local yasm-$YASM_VERSION.tar.gz not found, downloading from tortall.net..."
               curl -LkSs "https://www.tortall.net/projects/yasm/releases/yasm-$YASM_VERSION.tar.gz" | tar -xz
             fi
             mv yasm-$YASM_VERSION yasm
@@ -129,7 +138,8 @@ jobs:
             fi
 
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-nls \
-              CC="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" CFLAGS="-static"
+              CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" LD="$LD" OBJCOPY="$OBJCOPY" \
+              CFLAGS="-static"
             make -j"$(nproc --all)" install
             cd ..
           fi
@@ -155,8 +165,10 @@ jobs:
               -DCMAKE_BUILD_TYPE=RelWithDebInfo \
               -DCMAKE_C_FLAGS="-static" -DCMAKE_CXX_FLAGS="-static" -DCMAKE_EXE_LINKER_FLAGS="-static" \
               -DCMAKE_CROSSCOMPILING=True -DCMAKE_SYSTEM_NAME=Linux \
-              -DCMAKE_C_COMPILER="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" \
-              -DCMAKE_CXX_COMPILER="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang++" \
+              -DCMAKE_C_COMPILER="$CC" \
+              -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_AR="$AR" \
+              -DCMAKE_RANLIB="$RANLIB" \
               -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON
             cmake --build build --target install
             cd ..
@@ -175,16 +187,14 @@ jobs:
               chmod +x config.*
             fi
 
-            # 修复点: 使用 echo -e 替代 cat <<EOF 避免破坏 YAML 缩进
             echo -e "ac_cv_file__dev_ptmx=no\nac_cv_file__dev_ptc=no" > config.site
-            
-            # 修复点: 使用 bash 的 $'' 语法实现单行内包含真实换行符，完美适配 sed c\ 且不破坏 YAML
             sed -i $'/^case \\$host_cpu in #(/,/^esac$/c\\\nMODULE_BUILDTYPE=static' configure
 
+            # 补齐所有 Python 交叉编译需要的二进制工具环境变量
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-shared --disable-ipv6 \
               --with-build-python --without-ensurepip CONFIG_SITE=config.site \
-              CC="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" \
-              LDSHARED="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang -shared -fPIC" _PYTHON_HOST_PLATFORM="${{ env.TARGET }}"
+              CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" READELF="$READELF" STRIP="$STRIP" LD="$LD" OBJCOPY="$OBJCOPY" \
+              LDSHARED="$CC -shared -fPIC" _PYTHON_HOST_PLATFORM="${{ env.TARGET }}"
             make -j"$(nproc --all)" build_all || echo "WARNING: issue in building python"
             make install
             cd ..
