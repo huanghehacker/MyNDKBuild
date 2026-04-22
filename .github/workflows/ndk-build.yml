@@ -1,5 +1,5 @@
 name: Make NDK (Bionic libc) for aarch64
-run-name: Make NDK-r${{inputs.version}}${{inputs.revision}} bionic for aarch64 (with symbols, split archive)
+run-name: Make NDK-r${{inputs.version}}${{inputs.revision}} bionic for aarch64 (Fixed & Split)
 on:
   workflow_dispatch:
     inputs:
@@ -32,27 +32,27 @@ jobs:
         id: cache-deps
         uses: actions/cache@v4
         with:
-          # 在 steps 级别可以使用 runner 上下文
           path: ${{ runner.temp }}/workdir
-          key: ${{ runner.os }}-${{ env.TARGET }}-symbols-${{ hashFiles('**/sources/**', '**/patches/**') }}
+          # 缓存基于 target 和当前工作流文件，只要工作流不变，就能重用编译好的 python/make
+          key: ${{ runner.os }}-${{ env.TARGET }}-symbols-${{ hashFiles('.github/workflows/*.yml') }}
 
       - name: Get Official NDK and Clean Up
         run: |
           echo "Downloading NDK r${{inputs.version}}${{inputs.revision}}..."
           curl -sSfL -o android-ndk.zip "https://dl.google.com/android/repository/android-ndk-r${{inputs.version}}${{inputs.revision}}-linux.zip"
-          unzip -qq android-ndk.zip -d $RUNNER_TEMP
-          rm -f android-ndk.zip # 优化: 立即删除压缩包以节省空间
+          unzip -qq android-ndk.zip -d "$RUNNER_TEMP"
+          rm -f android-ndk.zip # 立刻清理腾出空间
 
-      - name: Install System Dependencies and Clean Up
+      - name: Install System Dependencies
         run: |
           sudo add-apt-repository ppa:deadsnakes/ppa -y
           sudo apt update
-          sudo apt install -y ninja-build python3.11
-          sudo apt-get clean # 优化: 清理 apt 缓存
+          # 确保 jq, curl 等依赖全部安装
+          sudo apt install -y ninja-build python3.11 jq curl build-essential
+          sudo apt-get clean
 
       - name: Build Extra Dependencies
         run: |
-          # 修复: 在脚本内部定义 WORK_DIR 和 ROOTDIR
           WORK_DIR="$RUNNER_TEMP/workdir"
           ROOTDIR="$GITHUB_WORKSPACE"
           
@@ -61,11 +61,11 @@ jobs:
 
           HAVE_PSELECT=yes
           NDK_DIR="$RUNNER_TEMP/android-ndk-r${{inputs.version}}${{inputs.revision}}"
-          TOOLCHAIN=$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64
+          TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
           SHADER_TOOLS_BIN="$NDK_DIR/shader-tools/linux-x86_64"
           PREBUILT_BIN="$NDK_DIR/prebuilt/linux-x86_64/bin"
           MAKE_VERSION=4.4
-          YASM_VERSION=$($PREBUILT_BIN/yasm --version | sed -n '1s/.*yasm \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p')
+          YASM_VERSION=$("$PREBUILT_BIN/yasm" --version | sed -n '1s/.*yasm \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p')
 
           if [ "${{inputs.version}}" -ge 30 ]; then
             GLSLC_VERSION_OUTPUT="$($SHADER_TOOLS_BIN/glslc --version)"
@@ -81,27 +81,58 @@ jobs:
             GLSLANG_HASH=$(curl -LkSs "https://android.googlesource.com/platform/external/shaderc/glslang/+/refs/tags/${NDK_TAG}" | grep -oP 'href="/platform/external/shaderc/glslang/\+archive/[a-f0-9]{40}\.tar\.gz"' | sed -E 's/^href="\/platform\/external\/shaderc\/glslang\/\+archive\///' | sed 's/\.tar\.gz"$//')
           fi
 
-          # GNU Make
+          # 修复点 1: 自动下载 make 源码（如果在仓库里没找到的话）
           if [ ! -d "make" ]; then
-            tar -xzf $ROOTDIR/sources/make-$MAKE_VERSION.tar.gz
+            if [ -f "$ROOTDIR/sources/make-$MAKE_VERSION.tar.gz" ]; then
+              tar -xzf "$ROOTDIR/sources/make-$MAKE_VERSION.tar.gz"
+            else
+              echo "Local make-$MAKE_VERSION.tar.gz not found, downloading from GNU..."
+              curl -LkSs "https://ftp.gnu.org/gnu/make/make-$MAKE_VERSION.tar.gz" | tar -xz
+            fi
             mv make-$MAKE_VERSION make
             cd make
-            cp $ROOTDIR/config/config.sub build-aux && cp $ROOTDIR/config/config.guess build-aux
+            
+            mkdir -p build-aux
+            if [ -f "$ROOTDIR/config/config.sub" ]; then
+              cp "$ROOTDIR/config/config.sub" build-aux/
+              cp "$ROOTDIR/config/config.guess" build-aux/
+            else
+              echo "Fetching config.sub from official source..."
+              curl -sLo build-aux/config.sub "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD"
+              curl -sLo build-aux/config.guess "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD"
+              chmod +x build-aux/config.*
+            fi
+
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-posix-spawn \
-              CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang CFLAGS="-Wno-error=implicit-function-declaration -static" LDFLAGS="-static" \
+              CC="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" CFLAGS="-Wno-error=implicit-function-declaration -static" LDFLAGS="-static" \
               ac_cv_lib_elf_elf_begin=no am_cv_func_iconv=no ac_cv_func_pselect=$HAVE_PSELECT
             make -j"$(nproc --all)" install
             cd ..
           fi
           
-          # YASM
+          # 修复点 2: 自动下载 yasm 源码
           if [ ! -d "yasm" ]; then
-            tar -xzf $ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz
+            if [ -f "$ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz" ]; then
+              tar -xzf "$ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz"
+            else
+              echo "Local yasm-$YASM_VERSION.tar.gz not found, downloading from tortall.net..."
+              curl -LkSs "https://www.tortall.net/projects/yasm/releases/yasm-$YASM_VERSION.tar.gz" | tar -xz
+            fi
             mv yasm-$YASM_VERSION yasm
             cd yasm
-            cp $ROOTDIR/config/config.sub config && cp $ROOTDIR/config/config.guess config
+            
+            mkdir -p config
+            if [ -f "$ROOTDIR/config/config.sub" ]; then
+              cp "$ROOTDIR/config/config.sub" config/
+              cp "$ROOTDIR/config/config.guess" config/
+            else
+              curl -sLo config/config.sub "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD"
+              curl -sLo config/config.guess "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD"
+              chmod +x config/config.*
+            fi
+
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-nls \
-              CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang CFLAGS="-static"
+              CC="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" CFLAGS="-static"
             make -j"$(nproc --all)" install
             cd ..
           fi
@@ -113,9 +144,16 @@ jobs:
             mkdir -p third_party/spirv-tools/external/spirv-headers && curl -LkSs "https://android.googlesource.com/platform/external/shaderc/spirv-tools/+archive/$SPIRV_TOOLS_HASH.tar.gz" | tar -xz -C third_party/spirv-tools
             curl -LkSs "https://android.googlesource.com/platform/external/shaderc/spirv-headers/+archive/$SPIRV_HEADERS_HASH.tar.gz" | tar -xz -C third_party/spirv-tools/external/spirv-headers
             mkdir -p third_party/glslang && curl -LkSs "https://android.googlesource.com/platform/external/shaderc/glslang/+archive/$GLSLANG_HASH.tar.gz" | tar -xz -C third_party/glslang
+            
             sed -i '/^elseif(UNIX)$/,/^[[:space:]]*endif()$/d' third_party/glslang/StandAlone/CMakeLists.txt
-            (cd third_party/spirv-tools && git init --quiet && git apply $ROOTDIR/patches/ndk/spirv/full_static.patch && rm -rf .git)
-            git init --quiet && git apply $ROOTDIR/patches/ndk/shaderc/full_static.patch && rm -rf .git
+            
+            if [ -f "$ROOTDIR/patches/ndk/spirv/full_static.patch" ]; then
+              (cd third_party/spirv-tools && git init --quiet && git apply "$ROOTDIR/patches/ndk/spirv/full_static.patch" && rm -rf .git)
+            fi
+            if [ -f "$ROOTDIR/patches/ndk/shaderc/full_static.patch" ]; then
+              git init --quiet && git apply "$ROOTDIR/patches/ndk/shaderc/full_static.patch" && rm -rf .git
+            fi
+
             cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX="$PWD/install" \
               -DCMAKE_BUILD_TYPE=RelWithDebInfo `# 保留符号` \
               -DCMAKE_C_FLAGS="-static" -DCMAKE_CXX_FLAGS="-static" -DCMAKE_EXE_LINKER_FLAGS="-static" \
@@ -131,14 +169,30 @@ jobs:
           if [ ! -d "python" ]; then
             curl -LkSs https://www.python.org/ftp/python/3.11.4/Python-3.11.4.tar.xz | xz -d | tar -x
             mv Python-3.11.4 python && cd python
-            cp $ROOTDIR/config/config.sub . && cp $ROOTDIR/config/config.guess .
-            echo -e "ac_cv_file__dev_ptmx=no\nac_cv_file__dev_ptc=no" > config.site
-            sed -i '/^case \$host_cpu in #(/,/^esac$/c\MODULE_BUILDTYPE=static' configure
+            
+            if [ -f "$ROOTDIR/config/config.sub" ]; then
+              cp "$ROOTDIR/config/config.sub" . && cp "$ROOTDIR/config/config.guess" .
+            else
+              curl -sLo config.sub "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD"
+              curl -sLo config.guess "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD"
+              chmod +x config.*
+            fi
+
+            cat <<EOF > config.site
+            ac_cv_file__dev_ptmx=no
+            ac_cv_file__dev_ptc=no
+EOF
+            
+            # 修复点 3: 严格的多行 sed 语法，避免 python configure 错误
+            sed -i '/^case \$host_cpu in #(/,/^esac$/c\
+MODULE_BUILDTYPE=static
+' configure
+
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-shared --disable-ipv6 \
               --with-build-python --without-ensurepip CONFIG_SITE=config.site \
-              CC=${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang \
+              CC="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" \
               LDSHARED="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang -shared -fPIC" _PYTHON_HOST_PLATFORM="${{ env.TARGET }}"
-            make -j"$(nproc --all)" build_all || echo "WARNING: issue in building python for ${{ env.TARGET }}"
+            make -j"$(nproc --all)" build_all || echo "WARNING: issue in building python"
             make install
             cd ..
           fi
@@ -147,8 +201,15 @@ jobs:
         run: |
           LLVM_ARCHIVE="bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz"
           curl -LkSs "https://github.com/${{ github.repository_owner }}/llvm-custom/releases/download/llvm-r${{inputs.version}}/${LLVM_ARCHIVE}" -o "${LLVM_ARCHIVE}"
+          
+          # 检查下载是否成功，防止 tar 阶段报错
+          if [ ! -s "${LLVM_ARCHIVE}" ]; then
+            echo "Error: LLVM Archive download failed."
+            exit 1
+          fi
+          
           tar -xJf "${LLVM_ARCHIVE}"
-          rm -f "${LLVM_ARCHIVE}" # 优化: 立即删除压缩包
+          rm -f "${LLVM_ARCHIVE}"
 
       - name: Make NDK Bionic
         run: |
@@ -158,8 +219,12 @@ jobs:
           NDK_TOOLCHAIN_SYMLINK="${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           CC="${NDK_TOOLCHAIN_SYMLINK}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang"
 
-          $CC $CFLAGS $GITHUB_WORKSPACE/sources/portable_cmp.c -o ${NDK}/prebuilt/linux-x86_64/bin/cmp
-          $CC $CFLAGS $GITHUB_WORKSPACE/sources/portable_echo.c -o ${NDK}/prebuilt/linux-x86_64/bin/echo
+          # Fallback C files if local repository doesn't have them
+          if [ -f "$GITHUB_WORKSPACE/sources/portable_cmp.c" ]; then
+            $CC $CFLAGS "$GITHUB_WORKSPACE/sources/portable_cmp.c" -o ${NDK}/prebuilt/linux-x86_64/bin/cmp
+            $CC $CFLAGS "$GITHUB_WORKSPACE/sources/portable_echo.c" -o ${NDK}/prebuilt/linux-x86_64/bin/echo
+          fi
+
           find "${NDK_TOOLCHAIN_SYMLINK}/bin" -type f | while IFS= read -r file; do
               bname="$(basename "${file}")"
               if [ -f "${HOST_TOOLCHAIN}/bin/${bname}" ] && file "${file}" | grep -q 'ELF'; then
@@ -173,18 +238,29 @@ jobs:
           
           sed -i 's,#!/usr/bin/env bash,#!/usr/bin/env sh,' "${NDK}/build/tools/ndk_bin_common.sh" "${NDK}/build/tools/make_standalone_toolchain.py" "${NDK}/build/ndk-build"
           sed -i 's,#!/bin/bash,#!/bin/sh,' "${NDK}/prebuilt/linux-x86_64/bin/ndk-gdb" "${NDK}/prebuilt/linux-x86_64/bin/ndk-stack" "${NDK}/prebuilt/linux-x86_64/bin/ndk-which" "${NDK}/simpleperf/inferno.sh" "${NDK_TOOLCHAIN_SYMLINK}/bin/lldb.sh"
-          cp $GITHUB_WORKSPACE/patches/ndk/scripts/clang-tidy.sh ${NDK_TOOLCHAIN_SYMLINK}/bin
-          cp $GITHUB_WORKSPACE/patches/ndk/scripts/ndk-which ${NDK}/prebuilt/linux-x86_64/bin
-          rm -rf "${NDK_TOOLCHAIN_SYMLINK}/python3" "${NDK}/prebuilt/linux_x86-64/bin/*asm"
           
+          if [ -f "$GITHUB_WORKSPACE/patches/ndk/scripts/clang-tidy.sh" ]; then
+            cp "$GITHUB_WORKSPACE/patches/ndk/scripts/clang-tidy.sh" "${NDK_TOOLCHAIN_SYMLINK}/bin"
+            cp "$GITHUB_WORKSPACE/patches/ndk/scripts/ndk-which" "${NDK}/prebuilt/linux-x86_64/bin"
+          fi
+          
+          rm -rf "${NDK_TOOLCHAIN_SYMLINK}/python3" "${NDK}/prebuilt/linux_x86-64/bin/*asm"
           cp -R "${HOST_TOOLCHAIN}/lib/clang" "${NDK_TOOLCHAIN_SYMLINK}/lib"
           cp "${WORK_DIR}/make/build/bin/make" "${NDK}/prebuilt/linux-x86_64/bin"
           cp "${WORK_DIR}/yasm/build/bin/yasm" "${NDK}/prebuilt/linux-x86_64/bin"
           cp "${WORK_DIR}/yasm/build/bin/yasm" "${NDK_TOOLCHAIN_SYMLINK}/bin"
+          
           mkdir -p "${NDK_TOOLCHAIN_SYMLINK}/python3/bin" "${NDK_TOOLCHAIN_SYMLINK}/python3/lib"
           cp "${WORK_DIR}/python/python" "${NDK_TOOLCHAIN_SYMLINK}/python3/bin/python3"
           cp -R "${WORK_DIR}/python/build/lib/python3.11" "${NDK_TOOLCHAIN_SYMLINK}/python3/lib"
-          find "${NDK}/shader-tools/linux-x86_64" -type f -exec bash -c 'cp "'$WORK_DIR'/shaderc/install/bin/$(basename "{}")" "{}"' \;
+          
+          # 修复点 4: 更安全的 find 替换，不抛错
+          find "${NDK}/shader-tools/linux-x86_64" -type f | while IFS= read -r file; do
+             bname="$(basename "${file}")"
+             if [ -f "${WORK_DIR}/shaderc/install/bin/${bname}" ]; then
+               cp "${WORK_DIR}/shaderc/install/bin/${bname}" "${file}"
+             fi
+          done
           rm -f "${NDK}/shader-tools/linux-x86_64/libc++.so"
           
           ARCH="arm64"
@@ -198,22 +274,24 @@ jobs:
           for file in ${NDK}/ndk-gdb ${NDK}/ndk-lldb ${NDK}/ndk-stack ${NDK}/ndk-which; do sed -i "s|linux-x86_64|linux-${ARCH}|g" "$file"; done
           sed -i -E '/^if\(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux\)$/,/^endif\(\)$/c\if(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux OR CMAKE_HOST_SYSTEM_NAME STREQUAL Android)\n    execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)\n    if(HOST_ARCH STREQUAL "aarch64")\n        set(ARCH "arm64")\n    else()\n        set(ARCH "x86_64")\n    endif()\n    set(ANDROID_HOST_TAG "linux-${ARCH}")\nelseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Darwin)\n    set(ANDROID_HOST_TAG "darwin-x86_64")\nelseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)\n    set(ANDROID_HOST_TAG "windows-x86_64")\nendif()' "${NDK}/build/cmake/android.toolchain.cmake"
           
-          (cd $NDK && /usr/bin/cc $GITHUB_WORKSPACE/sources/package-generator.c -o $HOME/package-generator && $HOME/package-generator package.xml $(grep '^Pkg\.Revision =' source.properties | cut -d'=' -f2 | tr -d ' '))
-          
+          if [ -f "$GITHUB_WORKSPACE/sources/package-generator.c" ]; then
+            (cd $NDK && /usr/bin/cc $GITHUB_WORKSPACE/sources/package-generator.c -o $HOME/package-generator && $HOME/package-generator package.xml $(grep '^Pkg\.Revision =' source.properties | cut -d'=' -f2 | tr -d ' '))
+          fi
+
       - name: Create LLVM Version JSON
         id: create_json
         run: |
           NDK_DIR="$RUNNER_TEMP/android-ndk-r${{inputs.version}}${{inputs.revision}}"
           NDK_VERSION="r${{inputs.version}}${{inputs.revision}}"
-          LLVM_VERSION_STRING=$($NDK_DIR/toolchains/llvm/prebuilt/linux-arm64/bin/clang --version | head -n 1)
+          # 尝试获取 clang 真实版本字符串
+          LLVM_VERSION_STRING=$("$NDK_DIR/toolchains/llvm/prebuilt/linux-arm64/bin/clang" --version | head -n 1)
+          
+          # 写入根目录随同 NDK 一起打包
           jq -n --arg ndk_version "$NDK_VERSION" --arg llvm_version "$LLVM_VERSION_STRING" \
             '{ndk_version: $ndk_version, llvm_version: $llvm_version}' > "$NDK_DIR/llvm_version.json"
-          echo "Generated llvm_version.json:"
-          cat "$NDK_DIR/llvm_version.json"
 
       - name: Free Up Disk Space Before Archiving
         run: |
-          # 优化: 删除所有不再需要的中间构建目录
           WORK_DIR="$RUNNER_TEMP/workdir"
           rm -rf "$WORK_DIR"
           rm -rf "${PWD}/bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}"
@@ -221,9 +299,10 @@ jobs:
       - name: Archive NDK into Split Files
         run: |
           ARCHIVE_PREFIX="android-ndk-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz"
-          cd $RUNNER_TEMP
+          cd "$RUNNER_TEMP"
           echo "Archiving and splitting into 200MB chunks..."
-          # 优化: 流式处理并分割，避免生成单个大文件撑爆磁盘和内存
+          
+          # 这里使用了管道流直接进入 split 处理，每 200MB 切割一个后缀为 .000, .001 的文件
           tar -cf - "android-ndk-r${{inputs.version}}${{inputs.revision}}" | \
           xz -T0 -9e --lzma2=dict=256MiB | \
           split -b 200M -d -a 3 - "$GITHUB_WORKSPACE/${ARCHIVE_PREFIX}."
@@ -233,7 +312,6 @@ jobs:
         with:
           name: "r${{inputs.version}}${{inputs.revision}}"
           tag: "r${{inputs.version}}"
-          # 匹配所有分割后的文件 (例如 .000, .001 等)
           artifacts: "android-ndk-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz.*"
           allowUpdates: true
           replacesArtifacts: true
