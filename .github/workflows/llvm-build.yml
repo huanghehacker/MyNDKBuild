@@ -1,0 +1,150 @@
+name: Build LLVM (Static + Plugins) - Termux Ready
+
+on:
+  workflow_dispatch:
+    inputs:
+      ndk_version:
+        description: "Android NDK Version"
+        default: 'r27c'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Clang/LLD (Static)
+    runs-on: ubuntu-24.04
+    
+    steps:
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - name: Setup Swap (16GB)
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      # 切换到指定的 LLVM Commit
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/llvm-project
+          ref: 2d287f51eff2a5fbf84458a33f7fb2493cf67965
+          path: llvm-project
+          fetch-depth: 1
+
+      # 安装构建依赖，增加 lld 和 ccache 以提升构建速度和降低内存消耗
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake build-essential xz-utils lld ccache
+
+      # 配置 CCache 缓存机制
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: llvm-build-${{ inputs.ndk_version }}-${{ github.sha }}
+          max-size: 3G
+
+      - name: Setup NDK
+        run: |
+          curl -sSfL -o android-ndk.zip "https://dl.google.com/android/repository/android-ndk-${{ inputs.ndk_version }}-linux.zip"
+          unzip -qq android-ndk.zip
+          NDK_ROOT=$(pwd)/android-ndk-${{ inputs.ndk_version }}
+          echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+
+      - name: Configure CMake
+        run: |
+          mkdir -p build
+          
+          # 核心修改说明：
+          # 1. 保持 -g0: 彻底抛弃 DWARF 调试符号(极其吃内存)，防卡死。
+          # 2. DO_STRIP=OFF + EXPORT_SYMBOLS_FOR_PLUGINS=ON: 确保动态符号表(dlsym需要的)被完整保留，Pass可以正常加载。
+          # 3. 增加 ccache 包装器，大幅提升二次构建速度。
+          # 4. 关闭 ZLIB/ZSTD/TERMINFO 等非必要功能，缩短编译时间。
+          
+          cmake -G Ninja -S llvm-project/llvm -B build \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK_ROOT }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-g0 -DNDEBUG" \
+            -DCMAKE_C_FLAGS="-g0 -DNDEBUG" \
+            -DLLVM_TARGETS_TO_BUILD="AArch64" \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_INCLUDE_UTILS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_ENABLE_LTO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            \
+            -DLLVM_PARALLEL_LINK_JOBS=1 \
+            -DLLVM_STATIC_LINK_CXX_STDLIB=ON \
+            -DLLVM_ENABLE_PLUGINS=ON \
+            -DLLVM_EXPORT_SYMBOLS_FOR_PLUGINS=ON \
+            -DLLVM_BUILD_LLVM_DYLIB=OFF \
+            -DLLVM_LINK_LLVM_DYLIB=OFF \
+            -DCMAKE_INSTALL_DO_STRIP=OFF \
+            \
+            -DCMAKE_INSTALL_PREFIX=$(pwd)/install_output
+
+      - name: Build & Install
+        run: |
+          # 限制最大并发数为 4，防止瞬间并发过高导致 CPU/内存 阻塞卡死
+          cmake --build build --target install -j4
+
+      - name: Cleanup Artifacts
+        run: |
+          cd install_output
+          # 删除静态库 (.a) 极大减小体积。
+          # 注意：你在 Termux 上编译 Pass（生成 .so）只需要头文件 (include/) 和 CMake 配置 (lib/cmake/)，不需要这些 .a 静态库。
+          find lib -name "*.a" -type f -delete 
+          
+          echo "Build finished. Final size:"
+          du -sh .
+
+      - name: Compress and Split
+        run: |
+          tar -cf - -C install_output . | xz -9e -T0 | split -b 400M - "ollvm-android.tar.xz."
+          ls -lh ollvm-android.tar.xz.*
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: success()
+        with:
+          tag_name: llvm-pass-ready-${{ github.run_number }}
+          name: LLVM Build (Pass Ready) ${{ github.run_number }}
+          body: |
+            LLVM Build for Android (AArch64) targeting Termux.
+            
+            **Configuration:**
+            - Source: `llvm/llvm-project` @ `2d287f51`
+            - NDK: ${{ inputs.ndk_version }}
+            - Projects: Clang, LLD
+            - Symbols: Dynamic Symbols Exported (Passes / Plugins Supported!)
+            - Debug Info: Stripped (-g0) to save space and memory.
+            
+            **How to use:**
+            Download all parts and run:
+            `cat ollvm-android.tar.xz.* | tar -xJ`
+          files: |
+            ollvm-android.tar.xz.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
