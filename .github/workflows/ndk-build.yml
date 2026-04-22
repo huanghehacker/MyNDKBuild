@@ -33,7 +33,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/workdir
-          # 缓存基于 target 和当前工作流文件，只要工作流不变，就能重用编译好的 python/make
           key: ${{ runner.os }}-${{ env.TARGET }}-symbols-${{ hashFiles('.github/workflows/*.yml') }}
 
       - name: Get Official NDK and Clean Up
@@ -41,13 +40,12 @@ jobs:
           echo "Downloading NDK r${{inputs.version}}${{inputs.revision}}..."
           curl -sSfL -o android-ndk.zip "https://dl.google.com/android/repository/android-ndk-r${{inputs.version}}${{inputs.revision}}-linux.zip"
           unzip -qq android-ndk.zip -d "$RUNNER_TEMP"
-          rm -f android-ndk.zip # 立刻清理腾出空间
+          rm -f android-ndk.zip
 
       - name: Install System Dependencies
         run: |
           sudo add-apt-repository ppa:deadsnakes/ppa -y
           sudo apt update
-          # 确保 jq, curl 等依赖全部安装
           sudo apt install -y ninja-build python3.11 jq curl build-essential
           sudo apt-get clean
 
@@ -81,7 +79,7 @@ jobs:
             GLSLANG_HASH=$(curl -LkSs "https://android.googlesource.com/platform/external/shaderc/glslang/+/refs/tags/${NDK_TAG}" | grep -oP 'href="/platform/external/shaderc/glslang/\+archive/[a-f0-9]{40}\.tar\.gz"' | sed -E 's/^href="\/platform\/external\/shaderc\/glslang\/\+archive\///' | sed 's/\.tar\.gz"$//')
           fi
 
-          # 修复点 1: 自动下载 make 源码（如果在仓库里没找到的话）
+          # GNU Make
           if [ ! -d "make" ]; then
             if [ -f "$ROOTDIR/sources/make-$MAKE_VERSION.tar.gz" ]; then
               tar -xzf "$ROOTDIR/sources/make-$MAKE_VERSION.tar.gz"
@@ -97,7 +95,6 @@ jobs:
               cp "$ROOTDIR/config/config.sub" build-aux/
               cp "$ROOTDIR/config/config.guess" build-aux/
             else
-              echo "Fetching config.sub from official source..."
               curl -sLo build-aux/config.sub "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD"
               curl -sLo build-aux/config.guess "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD"
               chmod +x build-aux/config.*
@@ -110,7 +107,7 @@ jobs:
             cd ..
           fi
           
-          # 修复点 2: 自动下载 yasm 源码
+          # YASM
           if [ ! -d "yasm" ]; then
             if [ -f "$ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz" ]; then
               tar -xzf "$ROOTDIR/sources/yasm-$YASM_VERSION.tar.gz"
@@ -155,7 +152,7 @@ jobs:
             fi
 
             cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX="$PWD/install" \
-              -DCMAKE_BUILD_TYPE=RelWithDebInfo `# 保留符号` \
+              -DCMAKE_BUILD_TYPE=RelWithDebInfo \
               -DCMAKE_C_FLAGS="-static" -DCMAKE_CXX_FLAGS="-static" -DCMAKE_EXE_LINKER_FLAGS="-static" \
               -DCMAKE_CROSSCOMPILING=True -DCMAKE_SYSTEM_NAME=Linux \
               -DCMAKE_C_COMPILER="${TOOLCHAIN}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang" \
@@ -178,15 +175,11 @@ jobs:
               chmod +x config.*
             fi
 
-            cat <<EOF > config.site
-            ac_cv_file__dev_ptmx=no
-            ac_cv_file__dev_ptc=no
-EOF
+            # 修复点: 使用 echo -e 替代 cat <<EOF 避免破坏 YAML 缩进
+            echo -e "ac_cv_file__dev_ptmx=no\nac_cv_file__dev_ptc=no" > config.site
             
-            # 修复点 3: 严格的多行 sed 语法，避免 python configure 错误
-            sed -i '/^case \$host_cpu in #(/,/^esac$/c\
-MODULE_BUILDTYPE=static
-' configure
+            # 修复点: 使用 bash 的 $'' 语法实现单行内包含真实换行符，完美适配 sed c\ 且不破坏 YAML
+            sed -i $'/^case \\$host_cpu in #(/,/^esac$/c\\\nMODULE_BUILDTYPE=static' configure
 
             ./configure --prefix="${PWD}/build" --build=x86_64-linux-gnu --host=${{ env.TARGET }} --disable-shared --disable-ipv6 \
               --with-build-python --without-ensurepip CONFIG_SITE=config.site \
@@ -202,7 +195,6 @@ MODULE_BUILDTYPE=static
           LLVM_ARCHIVE="bolt+clang+clang-tools-extra+lld-r${{inputs.version}}${{inputs.revision}}-${{env.TARGET}}.tar.xz"
           curl -LkSs "https://github.com/${{ github.repository_owner }}/llvm-custom/releases/download/llvm-r${{inputs.version}}/${LLVM_ARCHIVE}" -o "${LLVM_ARCHIVE}"
           
-          # 检查下载是否成功，防止 tar 阶段报错
           if [ ! -s "${LLVM_ARCHIVE}" ]; then
             echo "Error: LLVM Archive download failed."
             exit 1
@@ -219,7 +211,6 @@ MODULE_BUILDTYPE=static
           NDK_TOOLCHAIN_SYMLINK="${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           CC="${NDK_TOOLCHAIN_SYMLINK}/bin/${{env.TARGET}}${ANDROID_PLATFORM}-clang"
 
-          # Fallback C files if local repository doesn't have them
           if [ -f "$GITHUB_WORKSPACE/sources/portable_cmp.c" ]; then
             $CC $CFLAGS "$GITHUB_WORKSPACE/sources/portable_cmp.c" -o ${NDK}/prebuilt/linux-x86_64/bin/cmp
             $CC $CFLAGS "$GITHUB_WORKSPACE/sources/portable_echo.c" -o ${NDK}/prebuilt/linux-x86_64/bin/echo
@@ -254,7 +245,6 @@ MODULE_BUILDTYPE=static
           cp "${WORK_DIR}/python/python" "${NDK_TOOLCHAIN_SYMLINK}/python3/bin/python3"
           cp -R "${WORK_DIR}/python/build/lib/python3.11" "${NDK_TOOLCHAIN_SYMLINK}/python3/lib"
           
-          # 修复点 4: 更安全的 find 替换，不抛错
           find "${NDK}/shader-tools/linux-x86_64" -type f | while IFS= read -r file; do
              bname="$(basename "${file}")"
              if [ -f "${WORK_DIR}/shaderc/install/bin/${bname}" ]; then
@@ -283,10 +273,8 @@ MODULE_BUILDTYPE=static
         run: |
           NDK_DIR="$RUNNER_TEMP/android-ndk-r${{inputs.version}}${{inputs.revision}}"
           NDK_VERSION="r${{inputs.version}}${{inputs.revision}}"
-          # 尝试获取 clang 真实版本字符串
           LLVM_VERSION_STRING=$("$NDK_DIR/toolchains/llvm/prebuilt/linux-arm64/bin/clang" --version | head -n 1)
           
-          # 写入根目录随同 NDK 一起打包
           jq -n --arg ndk_version "$NDK_VERSION" --arg llvm_version "$LLVM_VERSION_STRING" \
             '{ndk_version: $ndk_version, llvm_version: $llvm_version}' > "$NDK_DIR/llvm_version.json"
 
@@ -302,7 +290,6 @@ MODULE_BUILDTYPE=static
           cd "$RUNNER_TEMP"
           echo "Archiving and splitting into 200MB chunks..."
           
-          # 这里使用了管道流直接进入 split 处理，每 200MB 切割一个后缀为 .000, .001 的文件
           tar -cf - "android-ndk-r${{inputs.version}}${{inputs.revision}}" | \
           xz -T0 -9e --lzma2=dict=256MiB | \
           split -b 200M -d -a 3 - "$GITHUB_WORKSPACE/${ARCHIVE_PREFIX}."
