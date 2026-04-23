@@ -1,4 +1,4 @@
-name: Build LLVM (Full-Featured, Static) - Termux
+name: Build LLVM (Full-Featured, Stable Fix) - Termux
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Clang/LLD (Full-Featured)
+    name: Build Clang/LLD (Full-Featured, Stable)
     runs-on: ubuntu-24.04
     
     steps:
@@ -27,7 +27,6 @@ jobs:
 
       - name: Setup Swap (16GB)
         run: |
-          # 编译 MLIR 和 Polly 非常消耗内存，Swap 是必须的
           sudo swapoff -a || true
           sudo rm -f /swapfile
           sudo fallocate -l 16G /swapfile
@@ -35,7 +34,6 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-      # 检出指定的 commit
       - name: Checkout Source
         uses: actions/checkout@v4
         with:
@@ -49,12 +47,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake build-essential xz-utils lld ccache
 
-      # ccache 在这种大型构建中尤为重要，可以大幅加速失败后的重试
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: llvm-full-featured-${{ inputs.ndk_version }}-${{ github.sha }}
-          max-size: 4G # 增加缓存大小以容纳更多项目
+          key: llvm-full-featured-fix-${{ inputs.ndk_version }}-${{ github.sha }}
+          max-size: 4G
 
       - name: Setup NDK
         run: |
@@ -67,9 +64,8 @@ jobs:
         run: |
           mkdir -p build
           
-          # ==== 采用你指定的稳定、功能完整的配置 ====
-          # - 目标: 仅构建 Android AArch64
-          # - 行为: 纯静态链接，但导出符号以加载 Pass
+          # ==== 已修复交叉编译冲突的稳定配置 ====
+          # 核心修复: 移除了与 NDK 工具链冲突的 compiler-rt 和 runtimes 的构建
           
           cmake -G Ninja -S llvm-project/llvm -B build \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -83,8 +79,7 @@ jobs:
             -DCMAKE_CXX_STANDARD=17 \
             -DLLVM_APPEND_VC_REV=ON \
             -DLLVM_TARGETS_TO_BUILD="AArch64" \
-            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;compiler-rt;lld;mlir;polly" \
-            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld;mlir;polly" \
             -DLLVM_INSTALL_UTILS=ON \
             \
             -DLLVM_ENABLE_BACKTRACES=OFF \
@@ -110,13 +105,11 @@ jobs:
 
       - name: Build & Install
         run: |
-          # 这是一个非常庞大的构建任务，请耐心等待
           cmake --build build --target install
 
       - name: Cleanup Artifacts
         run: |
           cd install_output
-          # 删除静态库以减小最终包体积
           find lib -name "*.a" -type f -delete 
           echo "Build finished. Final size:"
           du -sh .
@@ -130,16 +123,15 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: llvm-full-${{ github.run_number }}
-          name: LLVM Full-Featured Build ${{ github.run_number }} (Pass Ready)
+          tag_name: llvm-full-stable-${{ github.run_number }}
+          name: LLVM Full-Featured Build ${{ github.run_number }} (Stable)
           body: |
-            A full-featured, stable build of LLVM for Termux, based on your provided configuration.
+            A full-featured, stable build of LLVM for Termux. This version fixes the cross-compilation configuration conflict.
             
             **Configuration:**
             - Source: `llvm/llvm-project` @ `2d287f51`
             - Build Type: `Release`
-            - Projects: `clang`, `clang-tools-extra`, `compiler-rt`, `lld`, `mlir`, `polly`
-            - Runtimes: `libcxx`, `libcxxabi`, `libunwind`
+            - Projects: `clang`, `clang-tools-extra`, `lld`, `mlir`, `polly` (Note: `compiler-rt` and `runtimes` removed to fix build)
             - Linking: Pure static executable with exported symbols for Pass loading.
             
             **How to use:**
