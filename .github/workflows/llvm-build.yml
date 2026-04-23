@@ -1,4 +1,4 @@
-name: Build LLVM (Full-Featured, NDK Linker Fix) - Termux
+name: Build LLVM (Clang+LLD, Stable) - Termux
 
 on:
   workflow_dispatch:
@@ -13,17 +13,22 @@ permissions:
 
 jobs:
   build:
-    name: Build Clang/LLD (Full-Featured)
+    name: Build Clang/LLD
     runs-on: ubuntu-24.04
     
     steps:
-      - name: Free Disk Space
+      - name: Free Disk Space (Aggressive)
         run: |
+          # 依然保留清理，确保万无一失
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo docker system prune -a -f
+          sudo apt-get clean
 
       - name: Setup Swap (16GB)
         run: |
@@ -50,7 +55,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: llvm-full-ndk-fix-${{ inputs.ndk_version }}-${{ github.sha }}
+          key: llvm-clang-lld-stable-${{ inputs.ndk_version }}-${{ github.sha }}
           max-size: 4G
 
       - name: Setup NDK
@@ -64,8 +69,8 @@ jobs:
         run: |
           mkdir -p build
           
-          # ==== 终极修复版 ====
-          # 核心修复: 强行覆盖 NDK 的 --no-undefined 限制，允许插件包含未定义符号
+          # ==== 精简稳定版配置 ====
+          # 移除了 mlir 和 polly，保留核心的 clang, clang-tools-extra 和 lld
           
           cmake -G Ninja -S llvm-project/llvm -B build \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -75,6 +80,8 @@ jobs:
             -DANDROID_PLATFORM=android-29 \
             -DANDROID_STL=c++_static \
             \
+            -DCMAKE_C_FLAGS="-g0" \
+            -DCMAKE_CXX_FLAGS="-g0" \
             -DCMAKE_MODULE_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
             -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
             \
@@ -82,7 +89,7 @@ jobs:
             -DCMAKE_CXX_STANDARD=17 \
             -DLLVM_APPEND_VC_REV=ON \
             -DLLVM_TARGETS_TO_BUILD="AArch64" \
-            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld;mlir;polly" \
+            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld" \
             -DLLVM_INSTALL_UTILS=ON \
             \
             -DLLVM_ENABLE_LEGACY_PASS_MANAGER=ON \
@@ -110,6 +117,7 @@ jobs:
 
       - name: Build & Install
         run: |
+          # 去掉 mlir 后压力骤减，可以放心编译
           cmake --build build --target install -j4
 
       - name: Cleanup Artifacts
@@ -121,29 +129,29 @@ jobs:
 
       - name: Compress and Split
         run: |
-          tar -cf - -C install_output . | xz -9e -T0 | split -b 400M - "llvm-full-featured.tar.xz."
-          ls -lh llvm-full-featured.tar.xz.*
+          tar -cf - -C install_output . | xz -9e -T0 | split -b 400M - "llvm-clang-lld.tar.xz."
+          ls -lh llvm-clang-lld.tar.xz.*
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: llvm-full-ndkfix-${{ github.run_number }}
-          name: LLVM Full-Featured Build ${{ github.run_number }} (NDK Fix)
+          tag_name: llvm-clang-lld-${{ github.run_number }}
+          name: LLVM Clang+LLD Build ${{ github.run_number }} (Stable)
           body: |
-            A full-featured, stable build of LLVM for Termux. 
-            Fixed NDK linker issue (`--no-undefined`) preventing in-tree Pass plugins from building.
+            Streamlined, stable build of LLVM for Termux. 
+            Perfect for standard LLVM Pass development.
             
             **Configuration:**
             - Source: `llvm/llvm-project` @ `2d287f51`
-            - Build Type: `Release`
-            - Projects: `clang`, `clang-tools-extra`, `lld`, `mlir`, `polly`
+            - Build Type: `Release` (-g0)
+            - Projects: `clang`, `clang-tools-extra`, `lld`
             - Utils: `LLVM_INSTALL_UTILS=ON`
             
             **How to use:**
             Download all parts and run:
-            `cat llvm-full-featured.tar.xz.* | tar -xJ`
+            `cat llvm-clang-lld.tar.xz.* | tar -xJ`
           files: |
-            llvm-full-featured.tar.xz.*
+            llvm-clang-lld.tar.xz.*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
