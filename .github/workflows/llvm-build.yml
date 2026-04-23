@@ -1,4 +1,4 @@
-name: Build LLVM (Full-Featured, Stable Fix) - Termux
+name: Build LLVM (Full-Featured, Final Stable Fix) - Termux
 
 on:
   workflow_dispatch:
@@ -50,7 +50,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: llvm-full-featured-fix-${{ inputs.ndk_version }}-${{ github.sha }}
+          key: llvm-full-final-stable-fix-${{ inputs.ndk_version }}-${{ github.sha }}
           max-size: 4G
 
       - name: Setup NDK
@@ -64,8 +64,8 @@ jobs:
         run: |
           mkdir -p build
           
-          # ==== 已修复交叉编译冲突的稳定配置 ====
-          # 核心修复: 移除了与 NDK 工具链冲突的 compiler-rt 和 runtimes 的构建
+          # ==== 最终修复版稳定配置 ====
+          # CORE FIX: 显式启用 Legacy Pass Manager 的编译，以满足 bugpoint 等工具的依赖需求
           
           cmake -G Ninja -S llvm-project/llvm -B build \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -81,6 +81,8 @@ jobs:
             -DLLVM_TARGETS_TO_BUILD="AArch64" \
             -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld;mlir;polly" \
             -DLLVM_INSTALL_UTILS=ON \
+            \
+            -DLLVM_ENABLE_LEGACY_PASS_MANAGER=ON \
             \
             -DLLVM_ENABLE_BACKTRACES=OFF \
             -DLLVM_BUILD_DOCS=OFF \
@@ -105,7 +107,8 @@ jobs:
 
       - name: Build & Install
         run: |
-          cmake --build build --target install
+          # 增加 Legacy PM 会增加内存消耗，限制并发数保证稳定性
+          cmake --build build --target install -j4
 
       - name: Cleanup Artifacts
         run: |
@@ -123,16 +126,17 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: llvm-full-stable-${{ github.run_number }}
-          name: LLVM Full-Featured Build ${{ github.run_number }} (Stable)
+          tag_name: llvm-full-final-stable-${{ github.run_number }}
+          name: LLVM Full-Featured Build ${{ github.run_number }} (Final Stable)
           body: |
-            A full-featured, stable build of LLVM for Termux. This version fixes the cross-compilation configuration conflict.
+            A full-featured, stable build of LLVM for Termux. This version fixes the linker error by explicitly enabling the Legacy Pass Manager for tool compatibility.
             
             **Configuration:**
             - Source: `llvm/llvm-project` @ `2d287f51`
             - Build Type: `Release`
-            - Projects: `clang`, `clang-tools-extra`, `lld`, `mlir`, `polly` (Note: `compiler-rt` and `runtimes` removed to fix build)
-            - Linking: Pure static executable with exported symbols for Pass loading.
+            - Projects: `clang`, `clang-tools-extra`, `lld`, `mlir`, `polly`
+            - Utils: `LLVM_INSTALL_UTILS=ON` (Enabled)
+            - Legacy PM: `LLVM_ENABLE_LEGACY_PASS_MANAGER=ON` (Enabled for compatibility)
             
             **How to use:**
             Download all parts and run:
