@@ -1,4 +1,4 @@
-name: Build LLVM (Full-Featured, Final Stable Fix) - Termux
+name: Build LLVM (Full-Featured, NDK Linker Fix) - Termux
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Clang/LLD (Full-Featured, Stable)
+    name: Build Clang/LLD (Full-Featured)
     runs-on: ubuntu-24.04
     
     steps:
@@ -50,7 +50,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: llvm-full-final-stable-fix-${{ inputs.ndk_version }}-${{ github.sha }}
+          key: llvm-full-ndk-fix-${{ inputs.ndk_version }}-${{ github.sha }}
           max-size: 4G
 
       - name: Setup NDK
@@ -64,8 +64,8 @@ jobs:
         run: |
           mkdir -p build
           
-          # ==== 最终修复版稳定配置 ====
-          # CORE FIX: 显式启用 Legacy Pass Manager 的编译，以满足 bugpoint 等工具的依赖需求
+          # ==== 终极修复版 ====
+          # 核心修复: 强行覆盖 NDK 的 --no-undefined 限制，允许插件包含未定义符号
           
           cmake -G Ninja -S llvm-project/llvm -B build \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -74,6 +74,9 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
             -DANDROID_STL=c++_static \
+            \
+            -DCMAKE_MODULE_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
             \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_STANDARD=17 \
@@ -107,7 +110,6 @@ jobs:
 
       - name: Build & Install
         run: |
-          # 增加 Legacy PM 会增加内存消耗，限制并发数保证稳定性
           cmake --build build --target install -j4
 
       - name: Cleanup Artifacts
@@ -126,17 +128,17 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: llvm-full-final-stable-${{ github.run_number }}
-          name: LLVM Full-Featured Build ${{ github.run_number }} (Final Stable)
+          tag_name: llvm-full-ndkfix-${{ github.run_number }}
+          name: LLVM Full-Featured Build ${{ github.run_number }} (NDK Fix)
           body: |
-            A full-featured, stable build of LLVM for Termux. This version fixes the linker error by explicitly enabling the Legacy Pass Manager for tool compatibility.
+            A full-featured, stable build of LLVM for Termux. 
+            Fixed NDK linker issue (`--no-undefined`) preventing in-tree Pass plugins from building.
             
             **Configuration:**
             - Source: `llvm/llvm-project` @ `2d287f51`
             - Build Type: `Release`
             - Projects: `clang`, `clang-tools-extra`, `lld`, `mlir`, `polly`
-            - Utils: `LLVM_INSTALL_UTILS=ON` (Enabled)
-            - Legacy PM: `LLVM_ENABLE_LEGACY_PASS_MANAGER=ON` (Enabled for compatibility)
+            - Utils: `LLVM_INSTALL_UTILS=ON`
             
             **How to use:**
             Download all parts and run:
