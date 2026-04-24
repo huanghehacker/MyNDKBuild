@@ -1,4 +1,4 @@
-name: Build LLVM (Clang+LLD, Stable) - Termux
+name: Build LLVM (Clang+LLD, Pass Ready Fix) - Termux
 
 on:
   workflow_dispatch:
@@ -17,16 +17,14 @@ jobs:
     runs-on: ubuntu-24.04
     
     steps:
-      - name: Free Disk Space (Aggressive)
+      - name: Free Disk Space
         run: |
-          # 依然保留清理，确保万无一失
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo rm -rf /usr/local/share/boost
           sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/lib/node_modules
           sudo docker system prune -a -f
           sudo apt-get clean
 
@@ -55,7 +53,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: llvm-clang-lld-stable-${{ inputs.ndk_version }}-${{ github.sha }}
+          key: llvm-clang-lld-export-dyn-${{ inputs.ndk_version }}-${{ github.sha }}
           max-size: 4G
 
       - name: Setup NDK
@@ -69,8 +67,9 @@ jobs:
         run: |
           mkdir -p build
           
-          # ==== 精简稳定版配置 ====
-          # 移除了 mlir 和 polly，保留核心的 clang, clang-tools-extra 和 lld
+          # ==== 终极插件加载修复版 ====
+          # 核心修复: -DCMAKE_EXE_LINKER_FLAGS="-Wl,-export-dynamic"
+          # 强制将可执行文件(clang++)的所有符号导出到动态符号表，供 .so 插件 dlopen 时调用
           
           cmake -G Ninja -S llvm-project/llvm -B build \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -82,6 +81,7 @@ jobs:
             \
             -DCMAKE_C_FLAGS="-g0" \
             -DCMAKE_CXX_FLAGS="-g0" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-export-dynamic" \
             -DCMAKE_MODULE_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
             -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
             \
@@ -92,6 +92,7 @@ jobs:
             -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld" \
             -DLLVM_INSTALL_UTILS=ON \
             \
+            -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_LEGACY_PASS_MANAGER=ON \
             \
             -DLLVM_ENABLE_BACKTRACES=OFF \
@@ -117,7 +118,6 @@ jobs:
 
       - name: Build & Install
         run: |
-          # 去掉 mlir 后压力骤减，可以放心编译
           cmake --build build --target install -j4
 
       - name: Cleanup Artifacts
@@ -136,17 +136,17 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: llvm-clang-lld-${{ github.run_number }}
-          name: LLVM Clang+LLD Build ${{ github.run_number }} (Stable)
+          tag_name: llvm-clang-lld-dyn-${{ github.run_number }}
+          name: LLVM Clang+LLD Build ${{ github.run_number }} (Export Dynamic)
           body: |
             Streamlined, stable build of LLVM for Termux. 
-            Perfect for standard LLVM Pass development.
+            Fixed `dlopen` symbol resolution for Pass plugins by forcing `-Wl,-export-dynamic`.
             
             **Configuration:**
-            - Source: `llvm/llvm-project` @ `2d287f51`
             - Build Type: `Release` (-g0)
             - Projects: `clang`, `clang-tools-extra`, `lld`
-            - Utils: `LLVM_INSTALL_UTILS=ON`
+            - Features: `LLVM_ENABLE_RTTI=ON`, `LLVM_INSTALL_UTILS=ON`
+            - Linker: `-export-dynamic` applied to executables.
             
             **How to use:**
             Download all parts and run:
