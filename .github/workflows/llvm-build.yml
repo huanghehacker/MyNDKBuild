@@ -1,4 +1,4 @@
-name: Build LLVM (Clang+LLD, Pass Ready Fix) - Termux
+name: Build LLVM (Clang+LLD, Dynamic Link) - Termux
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Clang/LLD
+    name: Build Clang/LLD (Dynamic)
     runs-on: ubuntu-24.04
     
     steps:
@@ -53,7 +53,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: llvm-clang-lld-export-dyn-${{ inputs.ndk_version }}-${{ github.sha }}
+          key: llvm-clang-lld-dynamic-${{ inputs.ndk_version }}-${{ github.sha }}
           max-size: 4G
 
       - name: Setup NDK
@@ -67,9 +67,9 @@ jobs:
         run: |
           mkdir -p build
           
-          # ==== 终极插件加载修复版 ====
-          # 核心修复: -DCMAKE_EXE_LINKER_FLAGS="-Wl,-export-dynamic"
-          # 强制将可执行文件(clang++)的所有符号导出到动态符号表，供 .so 插件 dlopen 时调用
+          # ==== 终极动态链接版 ====
+          # 核心改动: 开启 LLVM_BUILD_LLVM_DYLIB 和 CLANG_LINK_CLANG_DYLIB
+          # 这样会生成 libLLVM.so，保留所有完整的 API 符号供 Pass 使用。
           
           cmake -G Ninja -S llvm-project/llvm -B build \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -81,7 +81,6 @@ jobs:
             \
             -DCMAKE_C_FLAGS="-g0" \
             -DCMAKE_CXX_FLAGS="-g0" \
-            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-export-dynamic" \
             -DCMAKE_MODULE_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
             -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--unresolved-symbols=ignore-all" \
             \
@@ -89,7 +88,7 @@ jobs:
             -DCMAKE_CXX_STANDARD=17 \
             -DLLVM_APPEND_VC_REV=ON \
             -DLLVM_TARGETS_TO_BUILD="AArch64" \
-            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld" \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
             -DLLVM_INSTALL_UTILS=ON \
             \
             -DLLVM_ENABLE_RTTI=ON \
@@ -104,14 +103,11 @@ jobs:
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             \
             -DLLVM_PARALLEL_LINK_JOBS=1 \
-            -DLLVM_STATIC_LINK_CXX_STDLIB=ON \
             -DLLVM_ENABLE_PLUGINS=ON \
-            -DLLVM_EXPORT_SYMBOLS_FOR_PLUGINS=ON \
             \
-            -DLLVM_BUILD_LLVM_DYLIB=OFF \
-            -DLLVM_LINK_LLVM_DYLIB=OFF \
-            -DLLVM_ENABLE_SHARED_LIBS=OFF \
-            -DCLANG_ENABLE_SHARED=OFF \
+            -DLLVM_BUILD_LLVM_DYLIB=ON \
+            -DLLVM_LINK_LLVM_DYLIB=ON \
+            -DCLANG_LINK_CLANG_DYLIB=ON \
             \
             -DCMAKE_INSTALL_DO_STRIP=OFF \
             -DCMAKE_INSTALL_PREFIX=$(pwd)/install_output
@@ -123,6 +119,7 @@ jobs:
       - name: Cleanup Artifacts
         run: |
           cd install_output
+          # 删除静态库(.a)节省空间，因为我们现在完全依赖动态库(.so)了
           find lib -name "*.a" -type f -delete 
           echo "Build finished. Final size:"
           du -sh .
@@ -136,17 +133,17 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: llvm-clang-lld-dyn-${{ github.run_number }}
-          name: LLVM Clang+LLD Build ${{ github.run_number }} (Export Dynamic)
+          tag_name: llvm-clang-lld-dynamic-${{ github.run_number }}
+          name: LLVM Clang+LLD Build ${{ github.run_number }} (Dynamic Link)
           body: |
             Streamlined, stable build of LLVM for Termux. 
-            Fixed `dlopen` symbol resolution for Pass plugins by forcing `-Wl,-export-dynamic`.
+            Uses DYNAMIC LINKING (`libLLVM.so`) to guarantee 100% symbol availability for Pass plugins.
             
             **Configuration:**
             - Build Type: `Release` (-g0)
             - Projects: `clang`, `clang-tools-extra`, `lld`
             - Features: `LLVM_ENABLE_RTTI=ON`, `LLVM_INSTALL_UTILS=ON`
-            - Linker: `-export-dynamic` applied to executables.
+            - Linking: `LLVM_BUILD_LLVM_DYLIB=ON`, `CLANG_LINK_CLANG_DYLIB=ON`
             
             **How to use:**
             Download all parts and run:
